@@ -1,7 +1,14 @@
 """Shared configuration for Lab 24: Eval + Guardrail Stack."""
 
 import os
+import sys
 from dotenv import load_dotenv
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 load_dotenv()
 
@@ -15,8 +22,8 @@ QDRANT_PORT = 6333
 COLLECTION_NAME = "lab24_production"
 
 # --- Embedding (same as Day 18) ---
-EMBEDDING_MODEL = "BAAI/bge-m3"
-EMBEDDING_DIM = 1024
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_DIM = 384
 
 # --- Chunking (same as Day 18) ---
 HIERARCHICAL_PARENT_SIZE = 2048
@@ -38,8 +45,21 @@ ADVERSARIAL_SET_PATH = os.path.join(os.path.dirname(__file__), "adversarial_set_
 GUARDRAILS_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "guardrails")
 
 # --- LLM Judge ---
-JUDGE_MODEL = "gpt-4o-mini"
+JUDGE_MODEL = os.getenv("MODEL_API_KEY", "openrouter/free") if os.getenv("OPENAI_API_KEY", "").startswith("sk-or-") else "gpt-4o-mini"
 
 # --- Guardrail latency budget ---
 LATENCY_BUDGET_P95_MS = 500  # target: full guard stack P95 < 500ms
 PRESIDIO_LANGUAGE = "en"    # Presidio base language; custom VN recognizers added via PatternRecognizer
+
+
+def get_llm_client():
+    """Return OpenAI client and model name, supporting both OpenAI and OpenRouter."""
+    from openai import OpenAI
+    key = os.getenv("OPENAI_API_KEY", "")
+    base_url = os.getenv("OPENAI_BASE_URL", os.getenv("OPENAI_API_BASE", None))
+    
+    if key.startswith("sk-or-"):
+        model = os.getenv("MODEL_API_KEY", "openai/gpt-4o-mini")
+        return OpenAI(api_key=key, base_url=base_url or "https://openrouter.ai/api/v1"), model
+    else:
+        return OpenAI(api_key=key, base_url=base_url), "gpt-4o-mini"

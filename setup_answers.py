@@ -16,6 +16,12 @@ import os
 import sys
 import time
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -74,29 +80,49 @@ def build_pipeline():
     return search, reranker, RERANK_TOP_K
 
 
+QUOTA_EXCEEDED = False
+
 def run_query(q: str, search, reranker, top_k: int) -> tuple[str, list[str]]:
+    global QUOTA_EXCEEDED
     from config import OPENAI_API_KEY
+    import time
 
     results = search.search(q)
     docs    = [{"text": r.text, "score": r.score, "metadata": r.metadata} for r in results]
     reranked = reranker.rerank(q, docs, top_k=top_k)
     contexts = [r.text for r in reranked] if reranked else [r.text for r in results[:3]]
 
-    if OPENAI_API_KEY and contexts:
-        try:
-            from openai import OpenAI
-            client = OpenAI()
-            ctx = "\n\n".join(contexts)
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Trả lời CHỈ dựa trên context. Nếu không có → nói 'Không tìm thấy.'"},
-                    {"role": "user",   "content": f"Context:\n{ctx}\n\nCâu hỏi: {q}"},
-                ],
-            )
-            return resp.choices[0].message.content, contexts
-        except Exception as e:
-            print(f"  ⚠️  LLM generation failed: {e}")
+    if OPENAI_API_KEY and contexts and not QUOTA_EXCEEDED:
+        from config import get_llm_client
+        client, model = get_llm_client()
+        ctx = "\n\n".join(contexts)
+        
+        for attempt in range(4):
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "Trả lời CHỈ dựa trên context. Nếu không có → nói 'Không tìm thấy.'"},
+                        {"role": "user",   "content": f"Context:\n{ctx}\n\nCâu hỏi: {q}"},
+                    ],
+                    timeout=15
+                )
+                return resp.choices[0].message.content, contexts
+            except Exception as e:
+                err_str = str(e)
+                if "free-models-per-day" in err_str:
+                    print(f"  ❌ OpenRouter daily free model quota exhausted: {e}. Switching to offline fallback mode.", flush=True)
+                    QUOTA_EXCEEDED = True
+                    break
+                
+                sleep_sec = 2 * (attempt + 1)
+                if "429" in err_str:
+                    sleep_sec = 15
+                print(f"  ⚠️  Attempt {attempt+1}/4 failed: {e}. Retrying in {sleep_sec}s...", flush=True)
+                if attempt < 3:
+                    time.sleep(sleep_sec)
+                else:
+                    print("  ❌ All LLM generation attempts failed. Falling back to context chunk.", flush=True)
 
     return (contexts[0] if contexts else "Không tìm thấy thông tin."), contexts
 
@@ -125,6 +151,7 @@ def main():
     t_start = time.time()
 
     for i, item in enumerate(test_set):
+        print(f"  [{i+1}/{len(test_set)}] Querying: {item['question'][:50]}...", flush=True)
         answer, contexts = run_query(item["question"], search, reranker, top_k)
         answers.append({
             "id":           item["id"],
@@ -134,8 +161,7 @@ def main():
             "contexts":     contexts,
             "ground_truth": item["ground_truth"],
         })
-        if (i + 1) % 10 == 0:
-            print(f"  [{i+1}/{len(test_set)}] done ({time.time()-t_start:.0f}s elapsed)")
+        time.sleep(1.0)
 
     with open("answers_50q.json", "w", encoding="utf-8") as f:
         json.dump(answers, f, ensure_ascii=False, indent=2)
